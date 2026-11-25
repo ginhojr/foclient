@@ -1,0 +1,8 @@
+{
+  "name": "FOCLIENT",
+  "description": "Plataforma SaaS Multicliente de atendimento via WhatsApp, CRM Kanban, Estúdio de Agentes de IA e cobrança Pix no chat.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
