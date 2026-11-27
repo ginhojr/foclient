@@ -1,0 +1,323 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum Role {
+  SUPER_ADMIN
+  TENANT_ADMIN
+  MANAGER
+  AGENT
+}
+
+enum PlanTier {
+  STARTER
+  GROWTH
+  SCALE
+}
+
+enum TenantStatus {
+  ACTIVE
+  TRIAL
+  PAST_DUE
+}
+
+enum WhatsAppProviderType {
+  BAILEYS
+  OPENWA
+  META_CLOUD_API
+}
+
+enum WhatsAppInstanceStatus {
+  DISCONNECTED
+  QR_READY
+  CONNECTING
+  CONNECTED
+}
+
+enum ConversationStatus {
+  BOT
+  OPEN
+  PENDING
+  CLOSED
+}
+
+enum MessageSenderType {
+  CONTACT
+  AGENT
+  AI
+  INTERNAL_NOTE
+}
+
+enum CrmStage {
+  novo_lead
+  qualificado_ia
+  proposta_enviada
+  aguardando_pagamento
+  ganho
+}
+
+enum LgpdStatus {
+  ativo
+  opt_out
+  anonimizado
+}
+
+enum PixChargeStatus {
+  PENDING
+  PAID
+  EXPIRED
+}
+
+model Tenant {
+  id                  String       @id @default(uuid()) @db.Uuid
+  slug                String       @unique
+  name                String
+  segment             String       @default("Comercial B2B/B2C")
+  whatsappNumber      String       @default("+55 (11) 99999-0000") @map("whatsapp_number")
+  plan                PlanTier     @default(GROWTH)
+  status              TenantStatus @default(ACTIVE)
+  mrr                 Float        @default(397)
+  usersLimit          Int          @default(10) @map("users_limit")
+  whatsappLimit       Int          @default(2) @map("whatsapp_limit")
+  aiInteractionsUsed  Int          @default(0) @map("ai_interactions_used")
+  aiInteractionsLimit Int          @default(5000) @map("ai_interactions_limit")
+  renewalDate         String       @default("15/12/2026") @map("renewal_date")
+  avgResponseSeconds  Int          @default(14) @map("avg_response_seconds")
+  baseChatsToday      Int          @default(45) @map("base_chats_today")
+  chatsGrowthPct      Float        @default(15.0) @map("chats_growth_pct")
+  baseAiResolvedPct   Int          @default(68) @map("base_ai_resolved_pct")
+  settings            Json?        @default("{}")
+  createdAt           DateTime     @default(now()) @map("created_at")
+  updatedAt           DateTime     @updatedAt @map("updated_at")
+
+  users             User[]
+  whatsappInstances WhatsAppInstance[]
+  contacts          Contact[]
+  deals             Deal[]
+  conversations     Conversation[]
+  messages          Message[]
+  aiAgent           AIAgent?
+  pixCharges        PixCharge[]
+  billingInvoices   BillingInvoice[]
+  auditLogs         AuditLog[]
+
+  @@map("tenants")
+}
+
+model User {
+  id               String   @id @default(uuid()) @db.Uuid
+  tenantId         String   @map("tenant_id") @db.Uuid
+  name             String
+  email            String   @unique
+  passwordHash     String   @map("password_hash")
+  role             Role     @default(AGENT)
+  refreshTokenHash String?  @map("refresh_token_hash")
+  isActive         Boolean  @default(true) @map("is_active")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  tenant                Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  assignedConversations Conversation[] @relation("AssignedAgent")
+  auditLogs             AuditLog[]
+
+  @@index([tenantId])
+  @@map("users")
+}
+
+model WhatsAppInstance {
+  id               String                 @id @default(uuid()) @db.Uuid
+  tenantId         String                 @map("tenant_id") @db.Uuid
+  name             String                 @default("Canal Principal")
+  provider         WhatsAppProviderType   @default(BAILEYS)
+  status           WhatsAppInstanceStatus @default(DISCONNECTED)
+  phoneNumber      String?                @map("phone_number")
+  encryptedSession String?                @map("encrypted_session") @db.Text
+  lastConnectedAt  DateTime?              @map("last_connected_at")
+  createdAt        DateTime               @default(now()) @map("created_at")
+  updatedAt        DateTime               @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@map("whatsapp_instances")
+}
+
+model Contact {
+  id              String     @id @default(uuid()) @db.Uuid
+  tenantId        String     @map("tenant_id") @db.Uuid
+  name            String
+  phone           String
+  phoneNormalized String     @map("phone_normalized")
+  email           String     @default("")
+  stage           CrmStage   @default(novo_lead)
+  tags            String[]   @default([])
+  origin          String     @default("WhatsApp Direto")
+  lgpdConsent     Boolean    @default(true) @map("lgpd_consent")
+  lgpdConsentAt   DateTime?  @map("lgpd_consent_at")
+  lgpdStatus      LgpdStatus @default(ativo) @map("lgpd_status")
+  createdAt       DateTime   @default(now()) @map("created_at")
+  updatedAt       DateTime   @updatedAt @map("updated_at")
+
+  tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  deals         Deal[]
+  conversations Conversation[]
+  pixCharges    PixCharge[]
+
+  @@index([tenantId])
+  @@index([tenantId, phoneNormalized])
+  @@map("contacts")
+}
+
+model Deal {
+  id                String   @id @default(uuid()) @db.Uuid
+  tenantId          String   @map("tenant_id") @db.Uuid
+  contactId         String   @map("contact_id") @db.Uuid
+  title             String
+  value             Float    @default(0)
+  stage             CrmStage @default(novo_lead)
+  tags              String[] @default([])
+  origin            String   @default("WhatsApp Direto")
+  lastInteractionAt DateTime @default(now()) @map("last_interaction_at")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, stage])
+  @@map("deals")
+}
+
+model Conversation {
+  id             String             @id @default(uuid()) @db.Uuid
+  tenantId       String             @map("tenant_id") @db.Uuid
+  contactId      String             @map("contact_id") @db.Uuid
+  assignedUserId String?            @map("assigned_user_id") @db.Uuid
+  status         ConversationStatus @default(BOT)
+  unreadCount    Int                @default(0) @map("unread_count")
+  channel        String             @default("WhatsApp Oficial")
+  aiSummary      String?            @map("ai_summary") @db.Text
+  lastMessageAt  DateTime           @default(now()) @map("last_message_at")
+  createdAt      DateTime           @default(now()) @map("created_at")
+  updatedAt      DateTime           @updatedAt @map("updated_at")
+
+  tenant       Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contact      Contact     @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  assignedUser User?       @relation("AssignedAgent", fields: [assignedUserId], references: [id], onDelete: SetNull)
+  messages     Message[]
+  pixCharges   PixCharge[]
+
+  @@index([tenantId])
+  @@index([tenantId, contactId])
+  @@map("conversations")
+}
+
+model Message {
+  id             String            @id @default(uuid()) @db.Uuid
+  tenantId       String            @map("tenant_id") @db.Uuid
+  conversationId String            @map("conversation_id") @db.Uuid
+  senderType     MessageSenderType @map("sender_type")
+  senderName     String            @map("sender_name")
+  content        String            @db.Text
+  mediaUrl       String?           @map("media_url")
+  mediaType      String?           @map("media_type")
+  externalId     String?           @map("external_id")
+  pixChargeId    String?           @unique @map("pix_charge_id") @db.Uuid
+  createdAt      DateTime          @default(now()) @map("created_at")
+
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  pixCharge    PixCharge?   @relation(fields: [pixChargeId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([conversationId, createdAt])
+  @@map("messages")
+}
+
+model AIAgent {
+  id                   String   @id @default(uuid()) @db.Uuid
+  tenantId             String   @unique @map("tenant_id") @db.Uuid
+  name                 String   @default("Clara IA")
+  roleTitle            String   @default("Especialista Comercial Digital") @map("role_title")
+  tone                 String   @default("Consultivo")
+  systemPrompt         String   @map("system_prompt") @db.Text
+  transcribeAudio      Boolean  @default(true) @map("transcribe_audio")
+  generatePixLink      Boolean  @default(true) @map("generate_pix_link")
+  handoffOnFrustration Boolean  @default(true) @map("handoff_on_frustration")
+  knowledgeDocuments   Json     @default("[]") @map("knowledge_documents")
+  encryptedApiKey      String?  @map("encrypted_api_key") @db.Text
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("ai_agents")
+}
+
+model PixCharge {
+  id             String          @id @default(uuid()) @db.Uuid
+  tenantId       String          @map("tenant_id") @db.Uuid
+  conversationId String?         @map("conversation_id") @db.Uuid
+  contactId      String?         @map("contact_id") @db.Uuid
+  description    String
+  amount         Float
+  copyPasteCode  String          @map("copy_paste_code") @db.Text
+  status         PixChargeStatus @default(PENDING)
+  expiresAt      DateTime        @map("expires_at")
+  paidAt         DateTime?       @map("paid_at")
+  createdAt      DateTime        @default(now()) @map("created_at")
+  updatedAt      DateTime        @updatedAt @map("updated_at")
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  contact      Contact?      @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  message      Message?
+
+  @@index([tenantId])
+  @@map("pix_charges")
+}
+
+model BillingInvoice {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  description String
+  type        String   @default("Pix no Chat")
+  clientOrRef String   @map("client_or_ref")
+  amount      Float
+  status      String   @default("Pago")
+  issuedAt    DateTime @default(now()) @map("issued_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("billing_invoices")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  userId    String?  @map("user_id") @db.Uuid
+  action    String
+  entity    String
+  entityId  String?  @map("entity_id")
+  metadata  Json?
+  ipAddress String?  @map("ip_address")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User?  @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([tenantId, createdAt])
+  @@map("audit_logs")
+}

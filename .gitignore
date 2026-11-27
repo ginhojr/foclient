@@ -1,8 +1,25 @@
+# Dependencies
 node_modules/
-build/
+**/node_modules/
+
+# Environment variables (NEVER commit secrets)
+.env
+.env.local
+.env.*.local
+backend/.env
+frontend/.env
+
+# Build outputs
 dist/
-coverage/
-.DS_Store
+**/dist/
+
+# WhatsApp Multi-Device sessions (contains auth keys)
+.wa_sessions/
+backend/.wa_sessions/
+_IGNORE_*/
+
+# Logs & OS files
 *.log
-.env*
-!.env.example
+npm-debug.log*
+.DS_Store
+Thumbs.db
