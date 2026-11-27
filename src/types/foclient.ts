@@ -4,8 +4,27 @@ export type ScreenId =
   | 'kanban'
   | 'contacts'
   | 'ai-studio'
+  | 'channels'
   | 'billing'
   | 'super-admin';
+
+export interface AuthUser {
+  id: string;
+  name: string;
+  email: string;
+  role: 'SUPER_ADMIN' | 'TENANT_ADMIN' | 'MANAGER' | 'AGENT';
+  tenantId: string;
+  tenantName: string;
+}
+
+export interface WhatsAppLiveStatus {
+  provider: 'BAILEYS' | 'OPENWA' | 'META_CLOUD_API';
+  engineName: string;
+  status: 'DISCONNECTED' | 'CONNECTING' | 'QR_READY' | 'CONNECTED';
+  qrCode: string | null;
+  phoneNumber: string | null;
+  lastConnectedAt?: string | null;
+}
 
 export type ThemeMode = 'light' | 'dark';
 

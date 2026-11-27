@@ -13,6 +13,7 @@ import {
   UserCheck,
 } from 'lucide-react';
 import { useFoclient } from '../../context/FoclientContext';
+import { api } from '../../services/api';
 import { AgentTone } from '../../types/foclient';
 import { generateSimulatedAgentReply } from '../../utils/foclientLogic';
 
@@ -64,26 +65,50 @@ export function AIAgentStudioScreen() {
     ]);
   }, [activeTenant.id, activeTenant.name]);
 
-  const handleSimulatedSend = (text: string) => {
+  const handleSimulatedSend = async (text: string) => {
     const trimmed = text.trim();
     if (!trimmed) return;
 
-    const reply = generateSimulatedAgentReply(trimmed, config, activeTenant.name);
+    setSimInput('');
     setSimMessages((prev) => [
       ...prev,
       { id: `u-${Date.now()}`, sender: 'user', text: trimmed },
-      {
-        id: `a-${Date.now() + 1}`,
-        sender: 'agent',
-        text: reply.text,
-        meta: {
-          triggeredHandoff: reply.triggeredHandoff,
-          includedPixOffer: reply.includedPixOffer,
-          matchedSource: reply.matchedSource,
-        },
-      },
     ]);
-    setSimInput('');
+
+    try {
+      const reply = await api.simulateAIAgent(
+        trimmed,
+        config as unknown as Record<string, unknown>
+      );
+      setSimMessages((prev) => [
+        ...prev,
+        {
+          id: `a-${Date.now() + 1}`,
+          sender: 'agent',
+          text: reply.text,
+          meta: {
+            triggeredHandoff: reply.triggeredHandoff,
+            includedPixOffer: reply.includedPixOffer,
+            matchedSource: reply.matchedSource,
+          },
+        },
+      ]);
+    } catch {
+      const reply = generateSimulatedAgentReply(trimmed, config, activeTenant.name);
+      setSimMessages((prev) => [
+        ...prev,
+        {
+          id: `a-${Date.now() + 1}`,
+          sender: 'agent',
+          text: reply.text,
+          meta: {
+            triggeredHandoff: reply.triggeredHandoff,
+            includedPixOffer: reply.includedPixOffer,
+            matchedSource: reply.matchedSource,
+          },
+        },
+      ]);
+    }
   };
 
   const handleAddUrl = (e: React.FormEvent) => {

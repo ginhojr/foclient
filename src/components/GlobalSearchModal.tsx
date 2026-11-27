@@ -10,6 +10,7 @@ const QUICK_NAV: { id: ScreenId; label: string }[] = [
   { id: 'kanban', label: 'CRM Kanban (Funil de Vendas)' },
   { id: 'contacts', label: 'Base de Contatos & LGPD' },
   { id: 'ai-studio', label: 'Estúdio de Agentes de IA' },
+  { id: 'channels', label: 'Integrações / WhatsApp (QR Code Real)' },
   { id: 'billing', label: 'Financeiro & Planos' },
   { id: 'super-admin', label: 'Painel Super Admin' },
 ];

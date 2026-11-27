@@ -1,7 +1,8 @@
-import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AIAgentConfig,
   AppNotification,
+  AuthUser,
   Contact,
   CrmStage,
   KnowledgeSource,
@@ -9,16 +10,43 @@ import {
   ScreenId,
   TenantData,
   ThemeMode,
+  WhatsAppLiveStatus,
 } from '../types/foclient';
 import { INITIAL_NOTIFICATIONS, INITIAL_TENANTS, PLAN_CATALOG } from '../data/mockTenants';
 import {
   anonymizeContactRecord,
-  buildPixCopyPasteCode,
   getInitials,
   moveDealToStage,
 } from '../utils/foclientLogic';
+import {
+  api,
+  clearAuthTokens,
+  getStoredAccessToken,
+  setAuthTokens,
+  setStoredTenantId,
+} from '../services/api';
+import {
+  connectSocket,
+  disconnectSocket,
+  joinTenantSocketRoom,
+} from '../services/socket';
 
 interface FoclientContextValue {
+  // Auth & Multi-tenancy
+  user: AuthUser | null;
+  authReady: boolean;
+  authLoading: boolean;
+  login: (email: string, password: string) => Promise<void>;
+  registerTenant: (payload: {
+    companyName: string;
+    segment: string;
+    name: string;
+    email: string;
+    password: string;
+  }) => Promise<void>;
+  logout: () => void;
+
+  // Workspace State
   tenants: TenantData[];
   activeTenantId: string;
   activeTenant: TenantData;
@@ -28,6 +56,9 @@ interface FoclientContextValue {
   globalSearchOpen: boolean;
   notifications: AppNotification[];
   toastMessage: string | null;
+  whatsappStatus: WhatsAppLiveStatus;
+
+  // Navigation & UI
   setActiveScreen: (screen: ScreenId) => void;
   switchTenant: (tenantId: string, navigateTo?: ScreenId) => void;
   setSelectedConversationId: (convId: string | null) => void;
@@ -36,6 +67,13 @@ interface FoclientContextValue {
   setGlobalSearchOpen: (open: boolean) => void;
   markAllNotificationsRead: () => void;
   dismissToast: () => void;
+
+  // WhatsApp Real Engine
+  refreshWhatsAppStatus: () => Promise<void>;
+  connectWhatsAppSession: () => Promise<void>;
+  disconnectWhatsAppSession: () => Promise<void>;
+  sendDirectWhatsAppTest: (to: string, text: string) => Promise<void>;
+
   // Inbox actions
   sendMessage: (
     conversationId: string,
@@ -47,6 +85,7 @@ interface FoclientContextValue {
   confirmPixPayment: (conversationId: string, messageId: string) => void;
   updateContactStage: (contactId: string, stage: CrmStage) => void;
   toggleContactTag: (contactId: string, tag: string) => void;
+
   // Kanban actions
   moveDeal: (dealId: string, nextStage: CrmStage) => void;
   createDeal: (payload: {
@@ -58,13 +97,18 @@ interface FoclientContextValue {
     origin: string;
     tags: string[];
   }) => void;
+
   // Contacts & LGPD
   anonymizeContact: (contactId: string) => void;
-  importSimulatedCsvContacts: (rows: { name: string; phone: string; email: string; tag: string }[]) => void;
+  importSimulatedCsvContacts: (
+    rows: { name: string; phone: string; email: string; tag: string }[]
+  ) => void;
+
   // AI Agent Studio
   updateAgentConfig: (patch: Partial<AIAgentConfig>) => void;
   addKnowledgeSource: (source: Omit<KnowledgeSource, 'id' | 'addedAt'>) => void;
   removeKnowledgeSource: (sourceId: string) => void;
+
   // Billing
   changePlanTier: (tier: PlanTier) => void;
 }
@@ -77,6 +121,10 @@ function nowHHMM(): string {
 }
 
 export function FoclientProvider({ children }: { children: React.ReactNode }) {
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [authReady, setAuthReady] = useState<boolean>(false);
+  const [authLoading, setAuthLoading] = useState<boolean>(false);
+
   const [tenants, setTenants] = useState<TenantData[]>(INITIAL_TENANTS);
   const [activeTenantId, setActiveTenantId] = useState<string>(INITIAL_TENANTS[0].id);
   const [activeScreen, setActiveScreen] = useState<ScreenId>('dashboard');
@@ -87,11 +135,202 @@ export function FoclientProvider({ children }: { children: React.ReactNode }) {
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
   const [notifications, setNotifications] = useState<AppNotification[]>(INITIAL_NOTIFICATIONS);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [whatsappStatus, setWhatsappStatus] = useState<WhatsAppLiveStatus>({
+    provider: 'BAILEYS',
+    engineName: 'Baileys Multi-Device WebSocket',
+    status: 'DISCONNECTED',
+    qrCode: null,
+    phoneNumber: null,
+  });
+
+  const agentSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const activeTenant = useMemo(
     () => tenants.find((t) => t.id === activeTenantId) ?? tenants[0],
     [tenants, activeTenantId]
   );
+
+  const showToast = useCallback((msg: string) => setToastMessage(msg), []);
+
+  const loadWorkspaceFromBackend = useCallback(async (preferredTenantId?: string) => {
+    const data = await api.getTenants();
+    if (Array.isArray(data.tenants) && data.tenants.length > 0) {
+      setTenants(data.tenants);
+      const targetId =
+        preferredTenantId && data.tenants.some((t: TenantData) => t.id === preferredTenantId)
+          ? preferredTenantId
+          : data.activeTenantId && data.tenants.some((t: TenantData) => t.id === data.activeTenantId)
+            ? data.activeTenantId
+            : data.tenants[0].id;
+
+      setActiveTenantId(targetId);
+      setStoredTenantId(targetId);
+      const targetTenant = data.tenants.find((t: TenantData) => t.id === targetId) ?? data.tenants[0];
+      setSelectedConversationId(targetTenant.conversations[0]?.id ?? null);
+
+      try {
+        const wa = await api.getWhatsAppStatus();
+        setWhatsappStatus(wa);
+      } catch {
+        // ignore
+      }
+    }
+  }, []);
+
+  // Restore session on mount
+  useEffect(() => {
+    const token = getStoredAccessToken();
+    if (!token) {
+      setAuthReady(true);
+      return;
+    }
+
+    (async () => {
+      try {
+        const meRes = await api.me();
+        setUser(meRes.user);
+        await loadWorkspaceFromBackend(meRes.user.tenantId);
+      } catch {
+        clearAuthTokens();
+        setUser(null);
+      } finally {
+        setAuthReady(true);
+      }
+    })();
+  }, [loadWorkspaceFromBackend]);
+
+  // Real-time Socket.io binding when authenticated
+  useEffect(() => {
+    if (!user || !activeTenantId) return;
+
+    const sock = connectSocket(activeTenantId);
+    joinTenantSocketRoom(activeTenantId);
+
+    const onWhatsAppQr = (payload: any) => {
+      if (payload.tenantId && payload.tenantId !== activeTenantId) return;
+      setWhatsappStatus((prev) => ({
+        ...prev,
+        status: 'QR_READY',
+        qrCode: payload.qrCode,
+      }));
+    };
+
+    const onWhatsAppStatus = (payload: any) => {
+      if (payload.tenantId && payload.tenantId !== activeTenantId) return;
+      setWhatsappStatus((prev) => ({
+        ...prev,
+        status: payload.status ?? prev.status,
+        qrCode: payload.qrCode !== undefined ? payload.qrCode : prev.qrCode,
+        phoneNumber: payload.phoneNumber !== undefined ? payload.phoneNumber : prev.phoneNumber,
+        engineName: payload.engineName ?? prev.engineName,
+      }));
+      if (payload.status === 'CONNECTED') {
+        showToast(
+          `WhatsApp conectado com sucesso (${payload.phoneNumber || 'Sessão Ativa'})!`
+        );
+      }
+    };
+
+    const onNewMessage = (payload: any) => {
+      if (payload.tenantId && payload.tenantId !== activeTenantId) return;
+      setTenants((prev) =>
+        prev.map((t) => {
+          if (t.id !== activeTenantId) return t;
+
+          let nextContacts = t.contacts;
+          if (payload.contact) {
+            const exists = t.contacts.some((c) => c.id === payload.contact.id);
+            nextContacts = exists
+              ? t.contacts.map((c) => (c.id === payload.contact.id ? payload.contact : c))
+              : [payload.contact, ...t.contacts];
+          }
+
+          let nextConversations = t.conversations;
+          if (payload.conversation) {
+            const existsConv = t.conversations.some((c) => c.id === payload.conversation.id);
+            nextConversations = existsConv
+              ? t.conversations.map((c) =>
+                  c.id === payload.conversation.id ? payload.conversation : c
+                )
+              : [payload.conversation, ...t.conversations];
+          }
+
+          return {
+            ...t,
+            contacts: nextContacts,
+            conversations: nextConversations,
+          };
+        })
+      );
+
+      if (payload.message?.sender === 'client') {
+        setNotifications((prev) => [
+          {
+            id: `notif-${Date.now()}`,
+            tenantId: activeTenantId,
+            title: `Nova mensagem de ${payload.message.senderName}`,
+            description: payload.message.content,
+            time: 'Agora',
+            read: false,
+            screen: 'inbox',
+          },
+          ...prev,
+        ]);
+      }
+    };
+
+    const onHandoff = (payload: any) => {
+      if (payload.tenantId && payload.tenantId !== activeTenantId) return;
+      if (payload.conversation) {
+        setTenants((prev) =>
+          prev.map((t) =>
+            t.id !== activeTenantId
+              ? t
+              : {
+                  ...t,
+                  conversations: t.conversations.map((c) =>
+                    c.id === payload.conversation.id ? payload.conversation : c
+                  ),
+                }
+          )
+        );
+      }
+      if (payload.contactName) {
+        setNotifications((prev) => [
+          {
+            id: `handoff-${Date.now()}`,
+            tenantId: activeTenantId,
+            title: `Transbordo IA → Humano (${payload.contactName})`,
+            description: payload.reason || 'Cliente solicitou atendimento humano.',
+            time: 'Agora',
+            read: false,
+            screen: 'inbox',
+          },
+          ...prev,
+        ]);
+        showToast(`Transbordo de IA: ${payload.contactName} aguarda atendente humano!`);
+      }
+    };
+
+    const onPixConfirmed = (payload: any) => {
+      if (payload.tenantId && payload.tenantId !== activeTenantId) return;
+      loadWorkspaceFromBackend(activeTenantId).catch(() => {});
+    };
+
+    sock.on('whatsapp:qr', onWhatsAppQr);
+    sock.on('whatsapp:status', onWhatsAppStatus);
+    sock.on('message:new', onNewMessage);
+    sock.on('conversation:handoff', onHandoff);
+    sock.on('pix:confirmed', onPixConfirmed);
+
+    return () => {
+      sock.off('whatsapp:qr', onWhatsAppQr);
+      sock.off('whatsapp:status', onWhatsAppStatus);
+      sock.off('message:new', onNewMessage);
+      sock.off('conversation:handoff', onHandoff);
+      sock.off('pix:confirmed', onPixConfirmed);
+    };
+  }, [user, activeTenantId, loadWorkspaceFromBackend, showToast]);
 
   // Sync dark mode class on <html>
   useEffect(() => {
@@ -122,21 +361,135 @@ export function FoclientProvider({ children }: { children: React.ReactNode }) {
     return () => clearTimeout(timer);
   }, [toastMessage]);
 
-  const showToast = (msg: string) => setToastMessage(msg);
+  const login = async (email: string, password: string) => {
+    setAuthLoading(true);
+    try {
+      const res = await api.login(email, password);
+      setAuthTokens(res.accessToken, res.refreshToken, res.user.tenantId);
+      setUser(res.user);
+      await loadWorkspaceFromBackend(res.user.tenantId);
+      setActiveScreen('dashboard');
+      showToast(`Bem-vindo(a), ${res.user.name}!`);
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const registerTenant = async (payload: {
+    companyName: string;
+    segment: string;
+    name: string;
+    email: string;
+    password: string;
+  }) => {
+    setAuthLoading(true);
+    try {
+      const res = await api.register(payload);
+      setAuthTokens(res.accessToken, res.refreshToken, res.user.tenantId);
+      setUser(res.user);
+      await loadWorkspaceFromBackend(res.user.tenantId);
+      setActiveScreen('dashboard');
+      showToast(`Empresa "${payload.companyName}" criada no Neon PostgreSQL!`);
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const logout = () => {
+    clearAuthTokens();
+    disconnectSocket();
+    setUser(null);
+    setActiveScreen('dashboard');
+  };
 
   const updateActiveTenant = (updater: (tenant: TenantData) => TenantData) => {
     setTenants((prev) => prev.map((t) => (t.id === activeTenantId ? updater(t) : t)));
   };
 
-  const switchTenant = (tenantId: string, navigateTo?: ScreenId) => {
+  const switchTenant = async (tenantId: string, navigateTo?: ScreenId) => {
     const nextTenant = tenants.find((t) => t.id === tenantId);
     if (!nextTenant) return;
+
     setActiveTenantId(tenantId);
+    setStoredTenantId(tenantId);
     setSelectedConversationId(nextTenant.conversations[0]?.id ?? null);
+    joinTenantSocketRoom(tenantId);
+
     if (navigateTo) {
       setActiveScreen(navigateTo);
     }
+
+    if (user?.role === 'SUPER_ADMIN') {
+      try {
+        const switched = await api.switchTenant(tenantId);
+        if (switched.accessToken) {
+          setAuthTokens(switched.accessToken, undefined, tenantId);
+        }
+        if (switched.tenant) {
+          setTenants((prev) =>
+            prev.map((t) => (t.id === tenantId ? switched.tenant : t))
+          );
+        }
+        const wa = await api.getWhatsAppStatus();
+        setWhatsappStatus(wa);
+      } catch (err) {
+        console.warn('[switchTenant] sync warning:', err);
+      }
+    }
+
     showToast(`Empresa ativa alterada para ${nextTenant.name}`);
+  };
+
+  const refreshWhatsAppStatus = useCallback(async () => {
+    try {
+      const status = await api.getWhatsAppStatus();
+      setWhatsappStatus(status);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const connectWhatsAppSession = async () => {
+    try {
+      const status = await api.connectWhatsApp();
+      setWhatsappStatus(status);
+      if (status.status === 'QR_READY') {
+        showToast('QR Code gerado! Escaneie com o WhatsApp do seu celular.');
+      } else if (status.status === 'CONNECTED') {
+        showToast('WhatsApp conectado com sucesso!');
+      }
+    } catch (err: any) {
+      showToast(err?.message || 'Erro ao iniciar sessão WhatsApp.');
+    }
+  };
+
+  const disconnectWhatsAppSession = async () => {
+    try {
+      await api.disconnectWhatsApp();
+      setWhatsappStatus((prev) => ({
+        ...prev,
+        status: 'DISCONNECTED',
+        qrCode: null,
+        phoneNumber: null,
+      }));
+      showToast('Sessão WhatsApp desconectada.');
+    } catch (err: any) {
+      showToast(err?.message || 'Erro ao desconectar WhatsApp.');
+    }
+  };
+
+  const sendDirectWhatsAppTest = async (to: string, text: string) => {
+    try {
+      const res = await api.sendDirectWhatsApp(to, text);
+      await loadWorkspaceFromBackend(activeTenantId);
+      showToast(
+        res.deliveredVia === 'baileys-whatsapp-real'
+          ? 'Mensagem enviada no WhatsApp real com sucesso!'
+          : 'Mensagem registrada na Inbox (conecte o QR Code para envio externo real).'
+      );
+    } catch (err: any) {
+      showToast(err?.message || 'Falha ao enviar mensagem.');
+    }
   };
 
   const handleSelectConversation = (convId: string | null) => {
@@ -148,9 +501,10 @@ export function FoclientProvider({ children }: { children: React.ReactNode }) {
         c.id === convId ? { ...c, unreadCount: 0 } : c
       ),
     }));
+    api.getMessages(convId).catch(() => {});
   };
 
-  const openContactInChat = (contactId: string) => {
+  const openContactInChat = async (contactId: string) => {
     const existing = activeTenant.conversations.find((c) => c.contactId === contactId);
     if (existing) {
       handleSelectConversation(existing.id);
@@ -158,256 +512,143 @@ export function FoclientProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    const contact = activeTenant.contacts.find((c) => c.id === contactId);
-    if (!contact) return;
-
-    const newConvId = `conv-${Date.now()}`;
-    updateActiveTenant((tenant) => ({
-      ...tenant,
-      conversations: [
-        {
-          id: newConvId,
-          contactId: contact.id,
-          status: 'humano',
-          unreadCount: 0,
-          channel: 'WhatsApp Oficial',
-          lastMessageAt: nowHHMM(),
-          aiActive: false,
-          aiSummary: `Conversa iniciada manualmente pelo painel para ${contact.name} (${contact.origin}).`,
-          messages: [
-            {
-              id: `msg-${Date.now()}`,
-              sender: 'internal_note',
-              senderName: 'Sistema FOCLIENT',
-              content: `Canal WhatsApp Oficial pronto para iniciar conversa ativa com ${contact.name}.`,
-              timestamp: nowHHMM(),
-            },
+    try {
+      const res = await api.openConversationForContact(contactId);
+      if (res.conversation) {
+        updateActiveTenant((tenant) => ({
+          ...tenant,
+          conversations: [
+            res.conversation,
+            ...tenant.conversations.filter((c) => c.id !== res.conversation.id),
           ],
-        },
-        ...tenant.conversations,
-      ],
-    }));
-    setSelectedConversationId(newConvId);
-    setActiveScreen('inbox');
+        }));
+        setSelectedConversationId(res.conversation.id);
+        setActiveScreen('inbox');
+      }
+    } catch (err: any) {
+      showToast(err?.message || 'Erro ao abrir conversa.');
+    }
   };
 
-  const sendMessage = (
+  const sendMessage = async (
     conversationId: string,
     content: string,
     mode: 'client_reply' | 'internal_note'
   ) => {
     const trimmed = content.trim();
     if (!trimmed) return;
-    const time = nowHHMM();
 
-    updateActiveTenant((tenant) => ({
-      ...tenant,
-      conversations: tenant.conversations.map((conv) => {
-        if (conv.id !== conversationId) return conv;
-        const nextStatus =
-          mode === 'client_reply' && conv.status === 'aguardando' ? 'humano' : conv.status;
-        return {
-          ...conv,
-          status: nextStatus,
-          aiActive: mode === 'client_reply' ? false : conv.aiActive,
-          lastMessageAt: time,
-          messages: [
-            ...conv.messages,
-            {
-              id: `msg-${Date.now()}`,
-              sender: mode === 'internal_note' ? 'internal_note' : 'human',
-              senderName: mode === 'internal_note' ? 'Você (Nota Interna)' : 'Você (Admin)',
-              content: trimmed,
-              timestamp: time,
-            },
-          ],
-        };
-      }),
-    }));
+    try {
+      const res = await api.sendMessage(conversationId, trimmed, mode);
+      if (res.conversation) {
+        updateActiveTenant((tenant) => ({
+          ...tenant,
+          conversations: tenant.conversations.map((c) =>
+            c.id === conversationId ? res.conversation : c
+          ),
+        }));
+      }
+    } catch (err: any) {
+      showToast(err?.message || 'Falha ao enviar mensagem.');
+    }
   };
 
-  const toggleConversationAI = (conversationId: string) => {
-    const time = nowHHMM();
-    let targetState = false;
-    updateActiveTenant((tenant) => ({
-      ...tenant,
-      conversations: tenant.conversations.map((conv) => {
-        if (conv.id !== conversationId) return conv;
-        const nextAiActive = !conv.aiActive;
-        targetState = nextAiActive;
-        return {
-          ...conv,
-          aiActive: nextAiActive,
-          status: nextAiActive ? 'ia' : 'humano',
-          messages: [
-            ...conv.messages,
-            {
-              id: `sys-${Date.now()}`,
-              sender: 'internal_note',
-              senderName: 'Controle de Atendimento',
-              content: nextAiActive
-                ? `Conversa devolvida para o agente ${tenant.agentConfig.name}.`
-                : 'Atendimento assumido manualmente por um atendente humano.',
-              timestamp: time,
-            },
-          ],
-        };
-      }),
-    }));
-    showToast(
-      targetState
-        ? `Agente ${activeTenant.agentConfig.name} reassumiu a conversa`
-        : 'Você assumiu o atendimento manualmente'
-    );
+  const toggleConversationAI = async (conversationId: string) => {
+    try {
+      const res = await api.toggleHandoff(conversationId);
+      if (res.conversation) {
+        updateActiveTenant((tenant) => ({
+          ...tenant,
+          conversations: tenant.conversations.map((c) =>
+            c.id === conversationId ? res.conversation : c
+          ),
+        }));
+        showToast(
+          res.aiActive
+            ? `Agente ${activeTenant.agentConfig.name} reassumiu a conversa`
+            : 'Você assumiu o atendimento manualmente'
+        );
+      }
+    } catch (err: any) {
+      showToast(err?.message || 'Erro ao alternar modo IA/Humano.');
+    }
   };
 
-  const sendPixChargeInChat = (conversationId: string, description: string, amount: number) => {
-    const time = nowHHMM();
-    const pixId = `pix-${Date.now()}`;
-    const copyPasteCode = buildPixCopyPasteCode(activeTenant.name, amount, pixId);
-
-    updateActiveTenant((tenant) => {
-      const conv = tenant.conversations.find((c) => c.id === conversationId);
-      const contact = tenant.contacts.find((c) => c.id === conv?.contactId);
-
-      return {
-        ...tenant,
-        conversations: tenant.conversations.map((c) =>
-          c.id !== conversationId
-            ? c
-            : {
-                ...c,
-                lastMessageAt: time,
-                messages: [
-                  ...c.messages,
-                  {
-                    id: `msg-pix-${Date.now()}`,
-                    sender: c.aiActive ? 'ai' : 'human',
-                    senderName: c.aiActive ? tenant.agentConfig.name : 'Você (Admin)',
-                    content: `Cobrança Pix gerada para "${description}". Assim que o pagamento for efetuado, a confirmação aparece automaticamente aqui.`,
-                    timestamp: time,
-                    pix: {
-                      id: pixId,
-                      description,
-                      amount,
-                      status: 'pendente',
-                      copyPasteCode,
-                      expiresAt: 'Expira em 24h',
-                    },
-                  },
-                ],
-              }
-        ),
-        contacts: contact
-          ? tenant.contacts.map((ct) =>
-              ct.id === contact.id ? { ...ct, stage: 'aguardando_pagamento' } : ct
-            )
-          : tenant.contacts,
-        deals: contact
-          ? tenant.deals.map((d) =>
-              d.contactId === contact.id ? { ...d, stage: 'aguardando_pagamento' } : d
-            )
-          : tenant.deals,
-      };
-    });
-
-    showToast('Cobrança Pix enviada no chat com sucesso');
+  const sendPixChargeInChat = async (
+    conversationId: string,
+    description: string,
+    amount: number
+  ) => {
+    try {
+      const res = await api.generatePix(conversationId, description, amount);
+      if (res.conversation) {
+        const targetContactId = res.conversation.contactId;
+        updateActiveTenant((tenant) => ({
+          ...tenant,
+          conversations: tenant.conversations.map((c) =>
+            c.id === conversationId ? res.conversation : c
+          ),
+          contacts: tenant.contacts.map((ct) =>
+            ct.id === targetContactId ? { ...ct, stage: 'aguardando_pagamento' } : ct
+          ),
+          deals: tenant.deals.map((d) =>
+            d.contactId === targetContactId ? { ...d, stage: 'aguardando_pagamento' } : d
+          ),
+        }));
+      }
+      showToast('Cobrança Pix gerada no Neon e enviada no chat!');
+    } catch (err: any) {
+      showToast(err?.message || 'Erro ao gerar cobrança Pix.');
+    }
   };
 
-  const confirmPixPayment = (conversationId: string, messageId: string) => {
-    const time = nowHHMM();
-    const todayStr = '25/11/2026';
-
-    updateActiveTenant((tenant) => {
-      const conv = tenant.conversations.find((c) => c.id === conversationId);
-      const targetMsg = conv?.messages.find((m) => m.id === messageId);
-      if (!conv || !targetMsg?.pix || targetMsg.pix.status === 'pago') return tenant;
-
-      const contact = tenant.contacts.find((c) => c.id === conv.contactId);
-      const clientName = contact?.name ?? 'Cliente WhatsApp';
-      const paidAmount = targetMsg.pix.amount;
-      const pixDesc = targetMsg.pix.description;
-
-      return {
-        ...tenant,
-        conversations: tenant.conversations.map((c) =>
-          c.id !== conversationId
-            ? c
-            : {
-                ...c,
-                lastMessageAt: time,
-                messages: c.messages.map((m) =>
-                  m.id === messageId && m.pix
-                    ? { ...m, pix: { ...m.pix, status: 'pago', paidAt: time } }
-                    : m
-                ),
-              }
-        ),
-        contacts: contact
-          ? tenant.contacts.map((ct) => (ct.id === contact.id ? { ...ct, stage: 'ganho' } : ct))
-          : tenant.contacts,
-        deals: contact
-          ? tenant.deals.map((d) =>
-              d.contactId === contact.id
-                ? { ...d, stage: 'ganho', lastInteraction: 'Pix pago agora' }
-                : d
-            )
-          : tenant.deals,
-        recentActivity: [
-          {
-            id: `act-${Date.now()}`,
-            type: 'pix_confirmed',
-            title: `Pix confirmado — ${clientName}`,
-            subtitle: pixDesc,
-            timestamp: 'Agora mesmo',
-            amount: paidAmount,
-          },
-          ...tenant.recentActivity,
-        ],
-        invoices: [
-          {
-            id: `inv-${Date.now()}`,
-            date: todayStr,
-            description: `Pix recebido — ${pixDesc}`,
-            type: 'Pix no Chat',
-            clientOrRef: clientName,
-            amount: paidAmount,
-            status: 'Pago',
-          },
-          ...tenant.invoices,
-        ],
-      };
-    });
-
-    showToast('Pagamento Pix confirmado! Dashboard e Financeiro atualizados.');
+  const confirmPixPayment = async (conversationId: string, messageId: string) => {
+    try {
+      await api.confirmPixWebhook({ conversationId, messageId });
+      await loadWorkspaceFromBackend(activeTenantId);
+      showToast('Pagamento Pix confirmado! Dashboard, CRM e Financeiro atualizados.');
+    } catch (err: any) {
+      showToast(err?.message || 'Erro ao confirmar Pix.');
+    }
   };
 
-  const updateContactStage = (contactId: string, stage: CrmStage) => {
+  const updateContactStage = async (contactId: string, stage: CrmStage) => {
     updateActiveTenant((tenant) => ({
       ...tenant,
       contacts: tenant.contacts.map((c) => (c.id === contactId ? { ...c, stage } : c)),
       deals: tenant.deals.map((d) =>
-        d.contactId === contactId ? { ...d, stage, lastInteraction: 'Agora mesmo' } : d
+        d.contactId === contactId ? { ...d, stage, lastInteraction: nowHHMM() } : d
       ),
     }));
-    showToast('Etapa do funil CRM atualizada');
+
+    try {
+      await api.patchContact(contactId, { stage });
+      showToast('Etapa do funil CRM salva no Neon');
+    } catch (err: any) {
+      showToast(err?.message || 'Erro ao salvar etapa.');
+    }
   };
 
-  const toggleContactTag = (contactId: string, tag: string) => {
+  const toggleContactTag = async (contactId: string, tag: string) => {
+    const contact = activeTenant.contacts.find((c) => c.id === contactId);
+    if (!contact) return;
+
+    const exists = contact.tags.includes(tag);
+    const nextTags = exists
+      ? contact.tags.filter((t) => t !== tag)
+      : [...contact.tags, tag];
+
     updateActiveTenant((tenant) => ({
       ...tenant,
-      contacts: tenant.contacts.map((c) => {
-        if (c.id !== contactId) return c;
-        const exists = c.tags.includes(tag);
-        return {
-          ...c,
-          tags: exists ? c.tags.filter((t) => t !== tag) : [...c.tags, tag],
-        };
-      }),
+      contacts: tenant.contacts.map((c) =>
+        c.id === contactId ? { ...c, tags: nextTags } : c
+      ),
     }));
+
+    api.patchContact(contactId, { tags: nextTags }).catch(() => {});
   };
 
-  const moveDeal = (dealId: string, nextStage: CrmStage) => {
+  const moveDeal = async (dealId: string, nextStage: CrmStage) => {
     updateActiveTenant((tenant) => {
       const targetDeal = tenant.deals.find((d) => d.id === dealId);
       const updatedDeals = moveDealToStage(tenant.deals, dealId, nextStage);
@@ -421,9 +662,15 @@ export function FoclientProvider({ children }: { children: React.ReactNode }) {
           : tenant.contacts,
       };
     });
+
+    try {
+      await api.moveDealStage(dealId, nextStage);
+    } catch (err: any) {
+      showToast(err?.message || 'Erro ao mover card no Kanban.');
+    }
   };
 
-  const createDeal = (payload: {
+  const createDeal = async (payload: {
     title: string;
     clientName: string;
     phone: string;
@@ -432,44 +679,20 @@ export function FoclientProvider({ children }: { children: React.ReactNode }) {
     origin: string;
     tags: string[];
   }) => {
-    const newContactId = `cnt-${Date.now()}`;
-    const newDealId = `deal-${Date.now()}`;
-    const newContact: Contact = {
-      id: newContactId,
-      name: payload.clientName,
-      phone: payload.phone || '+55 (11) 99000-0000',
-      email: `${payload.clientName.toLowerCase().replace(/\s+/g, '.')}@cliente.com.br`,
-      stage: payload.stage,
-      tags: payload.tags.length > 0 ? payload.tags : ['Novo'],
-      lgpdStatus: 'ativo',
-      lgpdVerifiedAt: '25/11/2026',
-      origin: payload.origin,
-      avatarInitials: getInitials(payload.clientName),
-    };
-
-    updateActiveTenant((tenant) => ({
-      ...tenant,
-      contacts: [newContact, ...tenant.contacts],
-      deals: [
-        {
-          id: newDealId,
-          contactId: newContactId,
-          title: payload.title,
-          clientName: payload.clientName,
-          value: payload.value,
-          stage: payload.stage,
-          tags: payload.tags.length > 0 ? payload.tags : ['Novo'],
-          origin: payload.origin,
-          lastInteraction: 'Agora mesmo',
-        },
-        ...tenant.deals,
-      ],
-    }));
-
-    showToast(`Negócio "${payload.title}" criado no funil`);
+    try {
+      const res = await api.createDeal(payload);
+      updateActiveTenant((tenant) => ({
+        ...tenant,
+        contacts: res.contact ? [res.contact, ...tenant.contacts] : tenant.contacts,
+        deals: res.deal ? [res.deal, ...tenant.deals] : tenant.deals,
+      }));
+      showToast(`Negócio "${payload.title}" criado no banco Neon`);
+    } catch (err: any) {
+      showToast(err?.message || 'Erro ao criar negócio.');
+    }
   };
 
-  const anonymizeContact = (contactId: string) => {
+  const anonymizeContact = async (contactId: string) => {
     updateActiveTenant((tenant) => ({
       ...tenant,
       contacts: tenant.contacts.map((c) =>
@@ -477,65 +700,87 @@ export function FoclientProvider({ children }: { children: React.ReactNode }) {
       ),
       deals: tenant.deals.map((d) =>
         d.contactId === contactId
-          ? { ...d, clientName: `Titular Anonimizado #${contactId.slice(-4).toUpperCase()}` }
+          ? {
+              ...d,
+              clientName: `Titular Anonimizado #${contactId.replace(/-/g, '').slice(-4).toUpperCase()}`,
+            }
           : d
       ),
     }));
-    showToast('Dados pessoais anonimizados conforme protocolo LGPD');
+
+    try {
+      const res = await api.anonymizeContact(contactId);
+      if (res.contact) {
+        updateActiveTenant((tenant) => ({
+          ...tenant,
+          contacts: tenant.contacts.map((c) => (c.id === contactId ? res.contact : c)),
+        }));
+      }
+      showToast('Dados pessoais anonimizados e Audit Log LGPD registrado!');
+    } catch (err: any) {
+      showToast(err?.message || 'Erro ao anonimizar contato.');
+    }
   };
 
-  const importSimulatedCsvContacts = (
+  const importSimulatedCsvContacts = async (
     rows: { name: string; phone: string; email: string; tag: string }[]
   ) => {
-    const newContacts: Contact[] = rows.map((row, idx) => ({
-      id: `cnt-csv-${Date.now()}-${idx}`,
-      name: row.name,
-      phone: row.phone,
-      email: row.email,
-      stage: 'novo_lead',
-      tags: [row.tag || 'Importado CSV'],
-      lgpdStatus: 'ativo',
-      lgpdVerifiedAt: '25/11/2026',
-      origin: 'Importação CSV',
-      avatarInitials: getInitials(row.name),
-    }));
-
-    updateActiveTenant((tenant) => ({
-      ...tenant,
-      contacts: [...newContacts, ...tenant.contacts],
-    }));
-    showToast(`${newContacts.length} contatos importados para a base LGPD`);
+    try {
+      const res = await api.importContacts(rows);
+      if (Array.isArray(res.contacts)) {
+        updateActiveTenant((tenant) => ({
+          ...tenant,
+          contacts: [...res.contacts, ...tenant.contacts],
+        }));
+        showToast(`${res.contacts.length} contatos importados no Neon PostgreSQL`);
+      }
+    } catch (err: any) {
+      showToast(err?.message || 'Erro ao importar CSV.');
+    }
   };
 
   const updateAgentConfig = (patch: Partial<AIAgentConfig>) => {
-    updateActiveTenant((tenant) => ({
-      ...tenant,
-      agentConfig: {
+    let mergedConfig: AIAgentConfig | null = null;
+    updateActiveTenant((tenant) => {
+      mergedConfig = {
         ...tenant.agentConfig,
         ...patch,
-      },
-    }));
+      };
+      return {
+        ...tenant,
+        agentConfig: mergedConfig,
+      };
+    });
+
+    if (agentSaveTimerRef.current) {
+      clearTimeout(agentSaveTimerRef.current);
+    }
+    agentSaveTimerRef.current = setTimeout(() => {
+      if (mergedConfig) {
+        api.updateAIAgent(mergedConfig as unknown as Record<string, unknown>).catch(() => {});
+      }
+    }, 500);
   };
 
-  const addKnowledgeSource = (source: Omit<KnowledgeSource, 'id' | 'addedAt'>) => {
-    updateActiveTenant((tenant) => ({
-      ...tenant,
-      agentConfig: {
-        ...tenant.agentConfig,
-        knowledgeBase: [
-          {
-            ...source,
-            id: `kb-${Date.now()}`,
-            addedAt: 'Hoje',
+  const addKnowledgeSource = async (source: Omit<KnowledgeSource, 'id' | 'addedAt'>) => {
+    try {
+      const res = await api.addKnowledgeSource(source);
+      if (res.source) {
+        updateActiveTenant((tenant) => ({
+          ...tenant,
+          agentConfig: {
+            ...tenant.agentConfig,
+            knowledgeBase: [res.source, ...tenant.agentConfig.knowledgeBase],
           },
-          ...tenant.agentConfig.knowledgeBase,
-        ],
-      },
-    }));
-    showToast(`Fonte "${source.title}" indexada na base RAG`);
+        }));
+        showToast(`Fonte "${source.title}" indexada na base RAG (Neon)`);
+      }
+    } catch (err: any) {
+      showToast(err?.message || 'Erro ao indexar fonte RAG.');
+    }
   };
 
-  const removeKnowledgeSource = (sourceId: string) => {
+  const removeKnowledgeSource = async (sourceId: string) => {
     updateActiveTenant((tenant) => ({
       ...tenant,
       agentConfig: {
@@ -543,9 +788,10 @@ export function FoclientProvider({ children }: { children: React.ReactNode }) {
         knowledgeBase: tenant.agentConfig.knowledgeBase.filter((k) => k.id !== sourceId),
       },
     }));
+    api.removeKnowledgeSource(sourceId).catch(() => {});
   };
 
-  const changePlanTier = (tier: PlanTier) => {
+  const changePlanTier = async (tier: PlanTier) => {
     const spec = PLAN_CATALOG[tier];
     updateActiveTenant((tenant) => ({
       ...tenant,
@@ -559,7 +805,13 @@ export function FoclientProvider({ children }: { children: React.ReactNode }) {
         aiInteractionsLimit: spec.aiInteractionsLimit,
       },
     }));
-    showToast(`Plano atualizado para ${tier} (R$ ${spec.price}/mês)`);
+
+    try {
+      await api.updateSubscription(tier);
+      showToast(`Plano atualizado para ${tier} (R$ ${spec.price}/mês) no Neon`);
+    } catch (err: any) {
+      showToast(err?.message || 'Erro ao atualizar assinatura.');
+    }
   };
 
   const markAllNotificationsRead = () => {
@@ -576,6 +828,12 @@ export function FoclientProvider({ children }: { children: React.ReactNode }) {
   return (
     <FoclientContext.Provider
       value={{
+        user,
+        authReady,
+        authLoading,
+        login,
+        registerTenant,
+        logout,
         tenants,
         activeTenantId,
         activeTenant,
@@ -585,6 +843,7 @@ export function FoclientProvider({ children }: { children: React.ReactNode }) {
         globalSearchOpen,
         notifications: tenantNotifications,
         toastMessage,
+        whatsappStatus,
         setActiveScreen,
         switchTenant,
         setSelectedConversationId: handleSelectConversation,
@@ -593,6 +852,10 @@ export function FoclientProvider({ children }: { children: React.ReactNode }) {
         setGlobalSearchOpen,
         markAllNotificationsRead,
         dismissToast: () => setToastMessage(null),
+        refreshWhatsAppStatus,
+        connectWhatsAppSession,
+        disconnectWhatsAppSession,
+        sendDirectWhatsAppTest,
         sendMessage,
         toggleConversationAI,
         sendPixChargeInChat,

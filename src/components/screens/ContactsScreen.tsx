@@ -11,6 +11,7 @@ import {
   X,
 } from 'lucide-react';
 import { useFoclient } from '../../context/FoclientContext';
+import { api } from '../../services/api';
 import { Contact } from '../../types/foclient';
 import {
   exportContactsToCSV,
@@ -65,6 +66,7 @@ export function ContactsScreen() {
   );
 
   const handleExportCSV = () => {
+    api.exportContactsCsv().catch(() => {});
     const csv = exportContactsToCSV(filteredContacts);
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);

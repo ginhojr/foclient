@@ -8,27 +8,30 @@ import {
   CreditCard,
   Kanban,
   LayoutDashboard,
+  LogOut,
   Menu,
   MessageSquare,
   Moon,
+  QrCode,
   Search,
   ShieldCheck,
+  Smartphone,
   Sun,
   Users,
   X,
 } from 'lucide-react';
 import { useFoclient } from '../context/FoclientContext';
 import { ScreenId } from '../types/foclient';
-import { calculateTenantMetrics } from '../utils/foclientLogic';
+import { calculateTenantMetrics, getInitials } from '../utils/foclientLogic';
 
 const SCREEN_META: Record<ScreenId, { title: string; subtitle: string }> = {
   dashboard: {
     title: 'Dashboard Operacional',
-    subtitle: 'Visão geral de atendimento, automação IA e vendas Pix',
+    subtitle: 'Visão geral em tempo real conectada ao Neon PostgreSQL',
   },
   inbox: {
     title: 'Inbox Omnichannel',
-    subtitle: 'WhatsApp API Oficial, transbordo de IA e cobrança no chat',
+    subtitle: 'WhatsApp Real, transbordo de IA e cobrança Pix no chat',
   },
   kanban: {
     title: 'CRM Kanban',
@@ -36,11 +39,15 @@ const SCREEN_META: Record<ScreenId, { title: string; subtitle: string }> = {
   },
   contacts: {
     title: 'Base de Contatos & LGPD',
-    subtitle: 'Gestão de opt-in, segmentação por tags e anonimização',
+    subtitle: 'Gestão de opt-in, segmentação por tags e anonimização com Audit Log',
   },
   'ai-studio': {
     title: 'Estúdio de Agentes de IA',
-    subtitle: 'Configure persona, habilidades, base RAG e teste ao vivo',
+    subtitle: 'Configure persona, habilidades, base RAG e simulador ao vivo',
+  },
+  channels: {
+    title: 'Integrações & WhatsApp Real',
+    subtitle: 'Pareamento via QR Code Multi-Device e Adapter Oficial Meta Cloud API',
   },
   billing: {
     title: 'Financeiro & Planos',
@@ -52,14 +59,24 @@ const SCREEN_META: Record<ScreenId, { title: string; subtitle: string }> = {
   },
 };
 
+const ROLE_LABELS: Record<string, string> = {
+  SUPER_ADMIN: 'Super Admin SaaS',
+  TENANT_ADMIN: 'Admin da Empresa',
+  MANAGER: 'Gestor Comercial',
+  AGENT: 'Atendente',
+};
+
 export function AppShell({ children }: { children: React.ReactNode }) {
   const {
+    user,
+    logout,
     tenants,
     activeTenant,
     activeScreen,
     theme,
     notifications,
     toastMessage,
+    whatsappStatus,
     setActiveScreen,
     switchTenant,
     toggleTheme,
@@ -75,12 +92,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   const metrics = calculateTenantMetrics(activeTenant);
   const unreadNotifications = notifications.filter((n) => !n.read).length;
+  const isWaConnected = whatsappStatus.status === 'CONNECTED';
+  const isWaQrReady = whatsappStatus.status === 'QR_READY';
 
   const navItems: {
     id: ScreenId;
     label: string;
     icon: React.ComponentType<{ className?: string }>;
-    badge?: number;
+    badge?: number | string;
   }[] = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     {
@@ -90,8 +109,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       badge: metrics.unreadTotal > 0 ? metrics.unreadTotal : undefined,
     },
     { id: 'kanban', label: 'CRM Kanban', icon: Kanban },
-    { id: 'contacts', label: 'Contatos', icon: Users },
+    { id: 'contacts', label: 'Contatos & LGPD', icon: Users },
     { id: 'ai-studio', label: 'Agentes de IA', icon: Bot },
+    {
+      id: 'channels',
+      label: 'Integrações / WhatsApp',
+      icon: Smartphone,
+      badge: isWaConnected ? 'ON' : isWaQrReady ? 'QR' : undefined,
+    },
     { id: 'billing', label: 'Financeiro & Planos', icon: CreditCard },
   ];
 
@@ -145,10 +170,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 </p>
               </div>
             </div>
-            <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" />
+            {tenants.length > 1 && <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" />}
           </button>
 
-          {tenantMenuOpen && (
+          {tenantMenuOpen && tenants.length > 1 && (
             <div className="absolute left-0 right-0 mt-1.5 z-40 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-lg py-1.5">
               <div className="px-3 py-1 text-[11px] font-medium text-slate-500 dark:text-slate-400">
                 Trocar empresa (Multi-tenant)
@@ -175,7 +200,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                         {tenant.segment}
                       </p>
                     </div>
-                    {isSelected && <Check className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />}
+                    {isSelected && (
+                      <Check className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                    )}
                   </button>
                 );
               })}
@@ -202,7 +229,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               }`}
             >
               <span className="flex items-center gap-2.5 truncate">
-                <Icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-white' : 'text-slate-400 dark:text-slate-500'}`} />
+                <Icon
+                  className={`w-4 h-4 shrink-0 ${
+                    isActive ? 'text-white' : 'text-slate-400 dark:text-slate-500'
+                  }`}
+                />
                 <span className="truncate">{item.label}</span>
               </span>
               {item.badge !== undefined && (
@@ -210,7 +241,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   className={`ml-2 px-1.5 py-0.5 text-[11px] font-mono tabular-nums font-semibold rounded-md ${
                     isActive
                       ? 'bg-white/20 text-white'
-                      : 'bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300'
+                      : item.badge === 'ON'
+                        ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300'
+                        : 'bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300'
                   }`}
                 >
                   {item.badge}
@@ -220,60 +253,73 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           );
         })}
 
-        <div className="pt-4 mt-4 border-t border-slate-200 dark:border-slate-800">
-          <div className="px-3 mb-1.5 text-[11px] font-medium text-slate-400 dark:text-slate-500">
-            Governança SaaS
+        {user?.role === 'SUPER_ADMIN' && (
+          <div className="pt-4 mt-4 border-t border-slate-200 dark:border-slate-800">
+            <div className="px-3 mb-1.5 text-[11px] font-medium text-slate-400 dark:text-slate-500">
+              Governança SaaS
+            </div>
+            <button
+              type="button"
+              onClick={() => handleNavClick('super-admin')}
+              aria-current={activeScreen === 'super-admin' ? 'page' : undefined}
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+                activeScreen === 'super-admin'
+                  ? 'bg-slate-900 dark:bg-indigo-600 text-white'
+                  : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800/80 hover:text-slate-900 dark:hover:text-white'
+              }`}
+            >
+              <span className="flex items-center gap-2.5 truncate">
+                <ShieldCheck
+                  className={`w-4 h-4 shrink-0 ${
+                    activeScreen === 'super-admin' ? 'text-white' : 'text-indigo-500'
+                  }`}
+                />
+                <span className="truncate">Super Admin</span>
+              </span>
+              <span className="text-[11px] font-mono tabular-nums opacity-75">
+                {tenants.length}
+              </span>
+            </button>
           </div>
-          <button
-            type="button"
-            onClick={() => handleNavClick('super-admin')}
-            aria-current={activeScreen === 'super-admin' ? 'page' : undefined}
-            className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
-              activeScreen === 'super-admin'
-                ? 'bg-slate-900 dark:bg-indigo-600 text-white'
-                : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800/80 hover:text-slate-900 dark:hover:text-white'
-            }`}
-          >
-            <span className="flex items-center gap-2.5 truncate">
-              <ShieldCheck
-                className={`w-4 h-4 shrink-0 ${
-                  activeScreen === 'super-admin' ? 'text-white' : 'text-indigo-500'
-                }`}
-              />
-              <span className="truncate">Super Admin</span>
-            </span>
-            <span className="text-[11px] font-mono tabular-nums opacity-75">
-              {tenants.length}
-            </span>
-          </button>
-        </div>
+        )}
       </nav>
 
-      {/* Sidebar Footer: User Profile + Theme Switch */}
+      {/* Sidebar Footer: Real User Profile + Theme + Logout */}
       <div className="p-3 border-t border-slate-200 dark:border-slate-800">
         <div className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg">
           <div className="flex items-center gap-2.5 min-w-0">
             <div className="w-8 h-8 rounded-full bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 flex items-center justify-center text-xs font-semibold shrink-0">
-              MC
+              {getInitials(user?.name || 'FC')}
             </div>
             <div className="min-w-0">
               <p className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate">
-                Mariana Costa
+                {user?.name || 'Usuário'}
               </p>
               <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
-                Admin da Empresa
+                {ROLE_LABELS[user?.role || 'AGENT'] ?? user?.role}
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={toggleTheme}
-            aria-label={theme === 'dark' ? 'Alternar para modo claro' : 'Alternar para modo escuro'}
-            title={theme === 'dark' ? 'Modo Claro' : 'Modo Escuro'}
-            className="p-2 rounded-lg text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-slate-100 transition-colors shrink-0"
-          >
-            {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-          </button>
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              type="button"
+              onClick={toggleTheme}
+              aria-label={theme === 'dark' ? 'Alternar para modo claro' : 'Alternar para modo escuro'}
+              title={theme === 'dark' ? 'Modo Claro' : 'Modo Escuro'}
+              className="p-1.5 rounded-lg text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-slate-100 transition-colors"
+            >
+              {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+            </button>
+            <button
+              type="button"
+              onClick={logout}
+              aria-label="Sair da conta"
+              title="Sair"
+              className="p-1.5 rounded-lg text-slate-500 dark:text-slate-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 hover:text-rose-600 dark:hover:text-rose-400 transition-colors"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -335,7 +381,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </kbd>
             </button>
 
-            {/* WhatsApp Official Connection Status */}
+            {/* Real-Time WhatsApp Connection Status */}
             <div className="relative">
               <button
                 type="button"
@@ -344,33 +390,61 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   setNotifOpen(false);
                 }}
                 aria-expanded={waStatusOpen}
-                className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg border border-emerald-200 dark:border-emerald-800/60 bg-emerald-50/80 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 text-xs font-medium hover:bg-emerald-100/70 dark:hover:bg-emerald-950/70 transition-colors whitespace-nowrap"
+                className={`hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors whitespace-nowrap ${
+                  isWaConnected
+                    ? 'border-emerald-200 dark:border-emerald-800/60 bg-emerald-50/80 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100/70'
+                    : isWaQrReady
+                      ? 'border-amber-200 dark:border-amber-800/60 bg-amber-50/80 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300'
+                      : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-100'
+                }`}
               >
                 <span className="relative flex h-2 w-2 shrink-0">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
+                  {isWaConnected && (
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                  )}
+                  <span
+                    className={`relative inline-flex rounded-full h-2 w-2 ${
+                      isWaConnected
+                        ? 'bg-emerald-500'
+                        : isWaQrReady
+                          ? 'bg-amber-500'
+                          : 'bg-slate-400'
+                    }`}
+                  />
                 </span>
-                <span>WhatsApp Oficial Conectado</span>
+                <span>
+                  {isWaConnected
+                    ? 'WhatsApp Real Conectado'
+                    : isWaQrReady
+                      ? 'Ler QR Code WhatsApp'
+                      : 'Conectar WhatsApp'}
+                </span>
               </button>
 
               {waStatusOpen && (
-                <div className="absolute right-0 mt-2 w-72 z-40 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-lg p-4">
+                <div className="absolute right-0 mt-2 w-80 z-40 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-lg p-4">
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-xs font-semibold text-slate-900 dark:text-white">
-                      Conexão WhatsApp Cloud API
+                      {whatsappStatus.engineName}
                     </span>
-                    <span className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
-                      Operacional
+                    <span
+                      className={`text-[11px] font-semibold ${
+                        isWaConnected
+                          ? 'text-emerald-600 dark:text-emerald-400'
+                          : 'text-amber-600 dark:text-amber-400'
+                      }`}
+                    >
+                      {isWaConnected ? 'Conectado' : isWaQrReady ? 'QR Pronto' : 'Desconectado'}
                     </span>
                   </div>
                   <p className="text-xs text-slate-600 dark:text-slate-300 mb-3">
-                    Canal ativo para <strong>{activeTenant.name}</strong>.
+                    Canal da empresa <strong>{activeTenant.name}</strong>.
                   </p>
-                  <div className="space-y-1.5 text-xs border-t border-slate-100 dark:border-slate-800 pt-2.5">
+                  <div className="space-y-1.5 text-xs border-t border-slate-100 dark:border-slate-800 pt-2.5 mb-3">
                     <div className="flex justify-between">
-                      <span className="text-slate-500 dark:text-slate-400">Número oficial</span>
+                      <span className="text-slate-500 dark:text-slate-400">Número</span>
                       <span className="font-mono tabular-nums text-slate-900 dark:text-slate-100">
-                        {activeTenant.whatsappNumber}
+                        {whatsappStatus.phoneNumber || activeTenant.whatsappNumber}
                       </span>
                     </div>
                     <div className="flex justify-between">
@@ -380,6 +454,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                       </span>
                     </div>
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setWaStatusOpen(false);
+                      setActiveScreen('channels');
+                    }}
+                    className="w-full inline-flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold transition-colors"
+                  >
+                    <QrCode className="w-3.5 h-3.5" />
+                    {isWaConnected ? 'Gerenciar Conexão WhatsApp' : 'Gerar QR Code WhatsApp'}
+                  </button>
                 </div>
               )}
             </div>
